@@ -37,8 +37,7 @@ EVENT_THRESHOLDS = {
 # トラッキングの設定
 TRACKING_CONFIG = {
     "max_age": 30,
-    "min_hits": 3,
-    "iou_threshold": 0.3
+    "min_hits": 3
 }
 
 # 可視化の設定

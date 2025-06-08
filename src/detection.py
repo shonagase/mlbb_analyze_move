@@ -3,8 +3,6 @@ import cv2
 import numpy as np
 from typing import List, Tuple, Dict, Optional
 import logging
-from ultralytics import YOLO
-from deep_sort_realtime.deepsort_tracker import DeepSort
 from configs.config import MODEL_DIR, CONFIDENCE_THRESHOLD, IOU_THRESHOLD, TRACKING_CONFIG
 
 logging.basicConfig(level=logging.INFO)
@@ -18,14 +16,16 @@ class MLBBDetector:
         Args:
             model_path (Optional[Path]): YOLOv8モデルのパス
         """
+        from ultralytics import YOLO
+        from deep_sort_realtime.deepsort_tracker import DeepSort
+        
         if model_path is None:
             model_path = MODEL_DIR / "mlbb_yolov8.pt"
         
         self.model = YOLO(str(model_path))
         self.tracker = DeepSort(
             max_age=TRACKING_CONFIG['max_age'],
-            n_init=TRACKING_CONFIG['min_hits'],
-            iou_threshold=TRACKING_CONFIG['iou_threshold']
+            n_init=TRACKING_CONFIG['min_hits']
         )
         
         # ヒーローのクラスIDとクラス名のマッピング
@@ -87,12 +87,20 @@ class MLBBDetector:
                 continue
 
             track_id = track.track_id
-            ltrb = track.to_ltrb()
-            tracking_results.append({
-                'track_id': track_id,
-                'bbox': [ltrb[0], ltrb[1], ltrb[2], ltrb[3]],
-                'class_name': track.get_det_class()
-            })
+            try:
+                # トラックの現在位置を取得
+                ltrb = track.to_tlbr()  # [top, left, bottom, right]
+                if isinstance(ltrb, (tuple, list, np.ndarray)) and len(ltrb) == 4:
+                    tracking_results.append({
+                        'track_id': track_id,
+                        'bbox': [float(ltrb[0]), float(ltrb[1]), float(ltrb[2]), float(ltrb[3])],
+                        'class_name': track.get_det_class()
+                    })
+                else:
+                    logger.warning(f"Invalid bounding box format for track {track_id}: {ltrb}")
+            except Exception as e:
+                logger.error(f"Error processing track {track_id}: {str(e)}")
+                continue
 
         return tracking_results
 
