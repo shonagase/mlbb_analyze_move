@@ -10,6 +10,7 @@ FRAME_DIR = DATA_DIR / "frames"
 OUTPUT_DIR = DATA_DIR / "output"
 MODEL_DIR = ROOT_DIR / "models"
 
+
 # フレーム抽出の設定
 FRAME_EXTRACTION_FPS = 2  # 1秒あたりのフレーム数
 FRAME_QUALITY = 95  # JPEGの品質（0-100）
