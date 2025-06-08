@@ -159,8 +159,54 @@ def process_video(video_path: Path):
     
     with st.spinner("分析を実行中..."):
         try:
-            analyzer.process_video(video_path)
+            # 動画の読み込み
+            cap = cv2.VideoCapture(str(video_path))
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            
+            # プログレスバーの作成
+            progress_bar = st.progress(0)
+            frame_placeholder = st.empty()
+            minimap_placeholder = st.empty()
+            
+            frame_count = 0
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                # フレームの処理
+                detections, tracks, minimap_results = analyzer.detector.process_frame(frame)
+                
+                # 結果の可視化
+                vis_frame = analyzer.detector.visualize_results(frame, detections, tracks, minimap_results)
+                
+                # フレームとミニマップの表示
+                frame_placeholder.image(vis_frame, channels="BGR", use_column_width=True)
+                minimap_placeholder.image(minimap_results[0], channels="BGR", caption="ミニマップ分析", use_column_width=True)
+                
+                # プログレスバーの更新
+                progress = int((frame_count + 1) / total_frames * 100)
+                progress_bar.progress(progress)
+                
+                frame_count += 1
+            
+            cap.release()
+            
+            # 移動パターンの分析結果を表示
+            st.subheader("移動パターン分析")
+            patterns = analyzer.detector.minimap_analyzer.analyze_movement_patterns()
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("味方チームの移動パターン")
+                st.write(patterns['ally'])
+            
+            with col2:
+                st.write("敵チームの移動パターン")
+                st.write(patterns['enemy'])
+            
             st.success("分析が完了しました")
+            
         except Exception as e:
             st.error(f"分析中にエラーが発生しました: {str(e)}")
 

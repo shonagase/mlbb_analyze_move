@@ -1,0 +1,165 @@
+import streamlit as st
+import cv2
+import numpy as np
+from pathlib import Path
+import torch
+import yt_dlp
+import tempfile
+import os
+from src.minimap_analyzer import MinimapAnalyzer
+import matplotlib.pyplot as plt
+
+st.set_page_config(page_title="MLBB Game Analyzer", layout="wide")
+
+st.title("MLBB Game Analyzer")
+
+# MinimapAnalyzerのインスタンスを作成
+@st.cache_resource
+def get_analyzer():
+    return MinimapAnalyzer()
+
+analyzer = get_analyzer()
+
+# サイドバーの設定
+st.sidebar.title("Settings")
+
+# 入力方法の選択
+input_method = st.sidebar.radio("Select Input Method", ["File Upload", "YouTube URL"])
+
+# 動画の取得
+video_path = None
+
+if input_method == "File Upload":
+    # ファイルアップロード
+    uploaded_file = st.sidebar.file_uploader("Upload Video", type=['mp4', 'avi'])
+    if uploaded_file is not None:
+        # 一時ファイルとして保存
+        temp_path = Path("temp_video.mp4")
+        with open(temp_path, "wb") as f:
+            f.write(uploaded_file.read())
+        video_path = temp_path
+
+else:
+    # YouTube URLの入力
+    youtube_url = st.sidebar.text_input("Enter YouTube URL")
+    if youtube_url:
+        try:
+            with st.spinner("Downloading video..."):
+                # yt-dlpの設定
+                ydl_opts = {
+                    'format': 'best[height<=720]',  # 720p以下の最高品質
+                    'outtmpl': 'temp_video.%(ext)s'
+                }
+                
+                # 動画のダウンロード
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(youtube_url, download=True)
+                    video_path = Path(f"temp_video.{info['ext']}")
+        except Exception as e:
+            st.error(f"Error downloading video: {str(e)}")
+
+# 分析設定
+st.sidebar.subheader("Analysis Settings")
+detect_minimap = st.sidebar.checkbox("Detect Minimap", value=True)
+track_players = st.sidebar.checkbox("Track Players", value=True)
+analyze_movement = st.sidebar.checkbox("Analyze Movement Patterns", value=True)
+
+# 移動パターン分析の設定
+if analyze_movement:
+    time_window = st.sidebar.slider("Time Window (frames)", 10, 100, 30)
+
+# メイン画面
+if video_path is not None and video_path.exists():
+    # ビデオの読み込み
+    cap = cv2.VideoCapture(str(video_path))
+    
+    # ビデオ情報の表示
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    duration = total_frames / fps
+    
+    st.write(f"Video Duration: {duration:.2f} seconds")
+    st.write(f"FPS: {fps}")
+    st.write(f"Total Frames: {total_frames}")
+    
+    # フレーム選択スライダー
+    frame_number = st.slider("Select Frame", 0, total_frames-1, 0)
+    
+    # 選択したフレームを表示
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+    ret, frame = cap.read()
+    if ret:
+        # フレームをRGBに変換
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # 分析結果の表示
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Original Frame")
+            st.image(frame_rgb, use_container_width=True)
+        
+        with col2:
+            st.subheader("Analysis Results")
+            if detect_minimap:
+                try:
+                    # ミニマップの検出
+                    minimap = analyzer.extract_minimap(frame)
+                    if minimap is not None and minimap.size > 0:  # ミニマップが正しく抽出されたか確認
+                        st.write("Minimap detected!")
+                        
+                        # デバッグ情報の表示
+                        st.write(f"Minimap shape: {minimap.shape}")
+                        st.write(f"Minimap size: {minimap.size}")
+                        
+                        minimap_rgb = cv2.cvtColor(minimap, cv2.COLOR_BGR2RGB)
+                        st.image(minimap_rgb, caption="Detected Minimap", use_container_width=True)
+                        
+                        # チーム位置の検出
+                        positions = analyzer.detect_team_positions(minimap)
+                        if positions and (len(positions['ally']) > 0 or len(positions['enemy']) > 0):
+                            st.write(f"Detected {len(positions['ally']) + len(positions['enemy'])} team positions")
+                            st.write(f"- Ally positions: {len(positions['ally'])}")
+                            st.write(f"- Enemy positions: {len(positions['enemy'])}")
+                            
+                            # 位置の可視化
+                            visualized_minimap = analyzer.visualize_minimap(minimap, positions)
+                            visualized_minimap_rgb = cv2.cvtColor(visualized_minimap, cv2.COLOR_BGR2RGB)
+                            st.image(visualized_minimap_rgb, caption="Team Positions", use_container_width=True)
+                            
+                            # 移動パターンの分析
+                            if analyze_movement:
+                                st.subheader("Movement Analysis")
+                                patterns = analyzer.analyze_movement_patterns()
+                                
+                                if patterns:
+                                    # 移動パターンの表示
+                                    st.write("Movement Patterns:")
+                                    for team in ['ally', 'enemy']:
+                                        st.write(f"\n{team.capitalize()} Team:")
+                                        st.write("Zone Distribution:")
+                                        for zone, count in patterns[team]['zones'].items():
+                                            st.write(f"- {zone}: {count}")
+                        else:
+                            st.write("No team positions detected in the minimap")
+                    else:
+                        st.write("No minimap detected in this frame")
+                        st.write("Debug info:")
+                        st.write(f"Frame shape: {frame.shape}")
+                        st.write(f"ROI settings: {analyzer.minimap_roi}")
+                except Exception as e:
+                    st.error(f"Error processing minimap: {str(e)}")
+            
+            if track_players:
+                st.write("Player Tracking: Not implemented yet")
+    
+    # ビデオリソースの解放
+    cap.release()
+    
+    # 一時ファイルの削除
+    video_path.unlink()
+else:
+    if input_method == "File Upload":
+        st.write("Please upload a video file to start analysis.")
+    else:
+        st.write("Please enter a valid YouTube URL to start analysis.") 

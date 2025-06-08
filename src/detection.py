@@ -4,6 +4,7 @@ import numpy as np
 from typing import List, Tuple, Dict, Optional
 import logging
 from configs.config import MODEL_DIR, CONFIDENCE_THRESHOLD, IOU_THRESHOLD, TRACKING_CONFIG
+from minimap_analyzer import MinimapAnalyzer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,6 +37,9 @@ class MLBBDetector:
             3: "minion",
             4: "jungle_monster"
         }
+        
+        # ミニマップ分析機能を追加
+        self.minimap_analyzer = MinimapAnalyzer()
 
     def detect_objects(self, frame: np.ndarray) -> List[Dict]:
         """
@@ -104,7 +108,7 @@ class MLBBDetector:
 
         return tracking_results
 
-    def process_frame(self, frame: np.ndarray) -> Tuple[List[Dict], List[Dict]]:
+    def process_frame(self, frame: np.ndarray) -> Tuple[List[Dict], List[Dict], Tuple[np.ndarray, Dict]]:
         """
         フレームの処理（検出とトラッキング）
 
@@ -112,13 +116,18 @@ class MLBBDetector:
             frame (np.ndarray): 入力フレーム
 
         Returns:
-            Tuple[List[Dict], List[Dict]]: 検出結果とトラッキング結果のタプル
+            Tuple[List[Dict], List[Dict], Tuple[np.ndarray, Dict]]: 
+            検出結果、トラッキング結果、ミニマップ分析結果のタプル
         """
         detections = self.detect_objects(frame)
         tracks = self.track_objects(frame, detections)
-        return detections, tracks
+        
+        # ミニマップ分析を実行
+        minimap_vis, minimap_positions = self.minimap_analyzer.process_frame(frame, len(self.minimap_analyzer.movement_history['ally']))
+        
+        return detections, tracks, (minimap_vis, minimap_positions)
 
-    def visualize_results(self, frame: np.ndarray, detections: List[Dict], tracks: List[Dict]) -> np.ndarray:
+    def visualize_results(self, frame: np.ndarray, detections: List[Dict], tracks: List[Dict], minimap_results: Tuple[np.ndarray, Dict]) -> np.ndarray:
         """
         検出とトラッキング結果を可視化
 
@@ -126,6 +135,7 @@ class MLBBDetector:
             frame (np.ndarray): 入力フレーム
             detections (List[Dict]): 検出結果
             tracks (List[Dict]): トラッキング結果
+            minimap_results (Tuple[np.ndarray, Dict]): ミニマップ分析結果
 
         Returns:
             np.ndarray: 可視化されたフレーム
@@ -145,28 +155,21 @@ class MLBBDetector:
             cv2.putText(vis_frame, label, 
                        (int(bbox[0]), int(bbox[1] - 10)),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-
-        # トラッキング結果の描画
-        for track in tracks:
-            bbox = track['bbox']
-            label = f"ID: {track['track_id']}"
-            color = (255, 0, 0)
-            
-            cv2.rectangle(vis_frame,
-                         (int(bbox[0]), int(bbox[1])),
-                         (int(bbox[2]), int(bbox[3])),
-                         color, 2)
-            cv2.putText(vis_frame, label,
-                       (int(bbox[0]), int(bbox[1] - 25)),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-
+        
+        # ミニマップ分析結果の描画
+        minimap_vis = minimap_results[0]
+        height, width = frame.shape[:2]
+        x = int(width * self.minimap_analyzer.minimap_roi['x'])
+        y = int(height * self.minimap_analyzer.minimap_roi['y'])
+        vis_frame[y:y+minimap_vis.shape[0], x:x+minimap_vis.shape[1]] = minimap_vis
+        
         return vis_frame
 
 if __name__ == "__main__":
     # 使用例
     detector = MLBBDetector()
     frame = cv2.imread("path/to/your/frame.jpg")
-    detections, tracks = detector.process_frame(frame)
-    vis_frame = detector.visualize_results(frame, detections, tracks)
+    detections, tracks, minimap_results = detector.process_frame(frame)
+    vis_frame = detector.visualize_results(frame, detections, tracks, minimap_results)
     cv2.imshow("Results", vis_frame)
     cv2.waitKey(0) 
