@@ -5,6 +5,7 @@ from typing import Optional, List, Tuple
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from configs.config import FRAME_DIR, FRAME_EXTRACTION_FPS, FRAME_QUALITY
+from .image_enhancer import ImageEnhancer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -15,6 +16,45 @@ class FrameExtractor:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.fps = FRAME_EXTRACTION_FPS
         self.quality = FRAME_QUALITY
+        self.enhancer = ImageEnhancer()
+
+    def process_frame(self, frame: np.ndarray) -> np.ndarray:
+        """
+        フレームの前処理を行う
+
+        Args:
+            frame (np.ndarray): 入力フレーム
+
+        Returns:
+            np.ndarray: 処理済みフレーム
+        """
+        # 解像度を1080pに統一
+        frame = cv2.resize(frame, (1920, 1080), interpolation=cv2.INTER_LANCZOS4)
+        
+        # 画質分析に基づいて必要な処理を決定
+        apply_sr, apply_clahe, adjust_brightness = self.enhancer.get_enhancement_params(frame)
+        
+        # 画質改善処理を適用
+        frame = self.enhancer.enhance_image(
+            frame,
+            apply_sr=apply_sr,
+            apply_clahe=apply_clahe,
+            adjust_brightness=adjust_brightness
+        )
+        
+        # ノイズ除去
+        frame = cv2.fastNlMeansDenoisingColored(frame, None, 10, 10, 7, 21)
+        
+        # シャープネス強調
+        kernel = np.array([[-1,-1,-1],
+                         [-1, 9,-1],
+                         [-1,-1,-1]])
+        frame = cv2.filter2D(frame, -1, kernel)
+        
+        # コントラストと明るさの調整
+        frame = cv2.convertScaleAbs(frame, alpha=1.1, beta=10)
+        
+        return frame
 
     def extract_frames(self, video_path: Path) -> Optional[Path]:
         """
@@ -54,8 +94,11 @@ class FrameExtractor:
                     break
 
                 if frame_count % frame_interval == 0:
+                    # フレームの処理
+                    processed_frame = self.process_frame(frame)
+                    
                     frame_path = frames_dir / f"frame_{saved_count:06d}.jpg"
-                    cv2.imwrite(str(frame_path), frame, 
+                    cv2.imwrite(str(frame_path), processed_frame, 
                               [cv2.IMWRITE_JPEG_QUALITY, self.quality])
                     saved_count += 1
 
@@ -102,24 +145,6 @@ class FrameExtractor:
         except Exception as e:
             logger.error(f"メタデータ取得中にエラーが発生: {str(e)}")
             return None
-
-    def process_frame(self, frame: np.ndarray) -> np.ndarray:
-        """
-        フレームの前処理を行う
-
-        Args:
-            frame (np.ndarray): 入力フレーム
-
-        Returns:
-            np.ndarray: 処理済みフレーム
-        """
-        # リサイズ（必要に応じて）
-        # frame = cv2.resize(frame, (1280, 720))
-        
-        # 色空間の変換（必要に応じて）
-        # frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        return frame
 
 if __name__ == "__main__":
     # 使用例

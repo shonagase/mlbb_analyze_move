@@ -7,6 +7,34 @@ from collections import defaultdict
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ミニマップの定数
+MINIMAP_CONSTANTS = {
+    'PLAYER_ICON': {
+        'MIN_AREA': 50,      # プレイヤーアイコンの最小面積
+        'MAX_AREA': 300,     # プレイヤーアイコンの最大面積
+        'MIN_CIRCULARITY': 0.7,  # プレイヤーアイコンの最小円形度
+    },
+    'COLORS': {
+        'ALLY': {
+            'PRIMARY': np.array([100, 150, 150]),  # 青チームの主要色
+            'SECONDARY': np.array([120, 255, 255])
+        },
+        'ENEMY': {
+            'PRIMARY': np.array([0, 150, 150]),    # 赤チームの主要色
+            'SECONDARY': np.array([10, 255, 255])
+        },
+        'ENEMY2': {
+            'PRIMARY': np.array([170, 150, 150]),  # 赤チームの補助色範囲
+            'SECONDARY': np.array([180, 255, 255])
+        }
+    },
+    'TOWER': {
+        'MIN_AREA': 100,     # タワーアイコンの最小面積
+        'MAX_AREA': 400,     # タワーアイコンの最大面積
+        'ASPECT_RATIO': 0.5  # タワーアイコンのアスペクト比（高さ/幅）
+    }
+}
+
 class MinimapAnalyzer:
     def __init__(self):
         """
@@ -14,8 +42,8 @@ class MinimapAnalyzer:
         """
         # ミニマップのROI（画面の左上）
         self.minimap_roi = {
-            'x': 0.0,  # 左端から0%（完全に左端から）
-            'y': 0.0,  # 上端から0%（完全に上端から）
+            'x': 0.0,  # 左端から0%
+            'y': 0.0,  # 上端から0%
             'width': 0.18,  # 画面幅の18%
             'height': 0.30  # 画面高さの30%
         }
@@ -23,13 +51,19 @@ class MinimapAnalyzer:
         # チームの色定義（HSV形式）
         self.team_colors = {
             'ally': {
-                'lower': np.array([90, 100, 100]),  # 青色系
-                'upper': np.array([130, 255, 255])
+                'lower': MINIMAP_CONSTANTS['COLORS']['ALLY']['PRIMARY'],
+                'upper': MINIMAP_CONSTANTS['COLORS']['ALLY']['SECONDARY']
             },
             'enemy': {
-                'lower': np.array([0, 100, 100]),   # 赤色系
-                'upper': np.array([10, 255, 255])
+                'lower': MINIMAP_CONSTANTS['COLORS']['ENEMY']['PRIMARY'],
+                'upper': MINIMAP_CONSTANTS['COLORS']['ENEMY']['SECONDARY']
             }
+        }
+        
+        # 赤色の第2範囲（HSVの色相は循環するため）
+        self.enemy_color_range2 = {
+            'lower': MINIMAP_CONSTANTS['COLORS']['ENEMY2']['PRIMARY'],
+            'upper': MINIMAP_CONSTANTS['COLORS']['ENEMY2']['SECONDARY']
         }
         
         # 移動履歴の保存用
@@ -41,6 +75,49 @@ class MinimapAnalyzer:
         # ミニマップのサイズ（初期値）
         self.minimap_width = 0
         self.minimap_height = 0
+
+    def _is_player_icon(self, contour: np.ndarray) -> bool:
+        """
+        輪郭がプレイヤーアイコンかどうかを判定
+
+        Args:
+            contour (np.ndarray): 輪郭データ
+
+        Returns:
+            bool: プレイヤーアイコンならTrue
+        """
+        # 面積チェック
+        area = cv2.contourArea(contour)
+        if area < MINIMAP_CONSTANTS['PLAYER_ICON']['MIN_AREA'] or \
+           area > MINIMAP_CONSTANTS['PLAYER_ICON']['MAX_AREA']:
+            return False
+
+        # 円形度チェック
+        perimeter = cv2.arcLength(contour, True)
+        if perimeter == 0:
+            return False
+        circularity = 4 * np.pi * area / (perimeter * perimeter)
+        if circularity < MINIMAP_CONSTANTS['PLAYER_ICON']['MIN_CIRCULARITY']:
+            return False
+
+        return True
+
+    def _check_color_consistency(self, roi_hsv: np.ndarray) -> bool:
+        """
+        色の一貫性をチェック
+
+        Args:
+            roi_hsv (np.ndarray): HSV色空間のROI
+
+        Returns:
+            bool: 色が一貫していればTrue
+        """
+        if roi_hsv.size == 0:
+            return False
+
+        # 色の標準偏差を計算
+        std_color = np.std(roi_hsv, axis=(0,1))
+        return std_color[0] < 15 and std_color[1] < 30 and std_color[2] < 30
 
     def extract_minimap(self, frame: np.ndarray) -> np.ndarray:
         """
@@ -78,29 +155,95 @@ class MinimapAnalyzer:
             'ally': [],
             'enemy': []
         }
+
+        # 画像の前処理
+        blurred = cv2.GaussianBlur(minimap, (5, 5), 0)
+        hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+
+        # 各チームの色マスクを作成
+        # 味方（青）の検出
+        ally_mask = cv2.inRange(hsv, self.team_colors['ally']['lower'], self.team_colors['ally']['upper'])
         
-        # HSVに変換
-        hsv = cv2.cvtColor(minimap, cv2.COLOR_BGR2HSV)
-        
-        for team in ['ally', 'enemy']:
-            # チームの色でマスク作成
-            mask = cv2.inRange(hsv, self.team_colors[team]['lower'], self.team_colors[team]['upper'])
-            
-            # ノイズ除去
-            kernel = np.ones((3,3), np.uint8)
+        # 敵（赤）の検出 - 両方の赤色範囲を組み合わせる
+        enemy_mask1 = cv2.inRange(hsv, self.team_colors['enemy']['lower'], self.team_colors['enemy']['upper'])
+        enemy_mask2 = cv2.inRange(hsv, self.enemy_color_range2['lower'], self.enemy_color_range2['upper'])
+        enemy_mask = cv2.bitwise_or(enemy_mask1, enemy_mask2)
+
+        # 各マスクに対してモルフォロジー処理
+        kernel = np.ones((3,3), np.uint8)
+        for mask in [ally_mask, enemy_mask]:
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-            
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+        # 各チームの位置を検出
+        for team, mask in [('ally', ally_mask), ('enemy', enemy_mask)]:
             # 輪郭検出
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
-            # 各輪郭の中心を計算
             for contour in contours:
+                # プレイヤーアイコンの判定
+                if not self._is_player_icon(contour):
+                    continue
+
+                # 輪郭の中心を計算
                 M = cv2.moments(contour)
-                if M["m00"] != 0:
-                    cx = int(M["m10"] / M["m00"])
-                    cy = int(M["m01"] / M["m00"])
-                    positions[team].append((cx, cy))
-        
+                if M["m00"] == 0:
+                    continue
+
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+
+                # 中心点の色を確認
+                roi_size = 3
+                x1 = max(0, cx - roi_size)
+                y1 = max(0, cy - roi_size)
+                x2 = min(minimap.shape[1], cx + roi_size + 1)
+                y2 = min(minimap.shape[0], cy + roi_size + 1)
+                
+                roi_hsv = hsv[y1:y2, x1:x2]
+                
+                # 色の一貫性をチェック
+                if not self._check_color_consistency(roi_hsv):
+                    continue
+
+                # 位置を追加
+                positions[team].append((cx, cy))
+
+        # 各チームの検出数を5つまでに制限（距離に基づいてフィルタリング）
+        for team in positions:
+            if len(positions[team]) > 5:
+                # 互いに最も離れた5つの点を選択
+                filtered_positions = []
+                current_positions = positions[team].copy()
+                
+                while len(filtered_positions) < 5 and current_positions:
+                    if not filtered_positions:
+                        # 最初の点を追加
+                        filtered_positions.append(current_positions.pop(0))
+                    else:
+                        # 既存の点から最も離れた点を見つける
+                        max_dist = -1
+                        best_point = None
+                        best_idx = -1
+                        
+                        for i, point in enumerate(current_positions):
+                            min_dist = float('inf')
+                            for existing_point in filtered_positions:
+                                dist = np.sqrt((point[0] - existing_point[0])**2 + 
+                                             (point[1] - existing_point[1])**2)
+                                min_dist = min(min_dist, dist)
+                            
+                            if min_dist > max_dist:
+                                max_dist = min_dist
+                                best_point = point
+                                best_idx = i
+                        
+                        if best_point is not None:
+                            filtered_positions.append(best_point)
+                            current_positions.pop(best_idx)
+                
+                positions[team] = filtered_positions
+
         return positions
 
     def update_movement_history(self, positions: Dict[str, List[Tuple[int, int]]], frame_number: int):
@@ -168,14 +311,70 @@ class MinimapAnalyzer:
         
         # チームごとに異なる色で描画
         colors = {
-            'ally': (0, 255, 0),  # 緑
-            'enemy': (0, 0, 255)  # 赤
+            'ally': (255, 100, 0),  # 青色（BGR）
+            'enemy': (0, 0, 255)    # 赤色（BGR）
+        }
+        
+        # グリッドを描画（3x3）
+        h, w = vis_map.shape[:2]
+        grid_color = (128, 128, 128)  # グレー
+        
+        # 縦線
+        for x in range(1, 3):
+            cv2.line(vis_map, (w * x // 3, 0), (w * x // 3, h), grid_color, 1)
+        
+        # 横線
+        for y in range(1, 3):
+            cv2.line(vis_map, (0, h * y // 3), (w, h * y // 3), grid_color, 1)
+        
+        # 検出位置の可視化を改善
+        for team, pos_list in positions.items():
+            for i, pos in enumerate(pos_list):
+                # 外側の円（輪郭）
+                cv2.circle(vis_map, pos, 8, colors[team], 2)
+                # 内側の円（塗りつぶし）
+                cv2.circle(vis_map, pos, 4, colors[team], -1)
+                
+                # プレイヤー番号を表示
+                label = f"{team[0].upper()}{i+1}"  # A1, A2, ... または E1, E2, ...
+                cv2.putText(vis_map, label, 
+                          (pos[0] - 10, pos[1] - 10),
+                          cv2.FONT_HERSHEY_SIMPLEX, 
+                          0.4, colors[team], 1)
+        
+        # 検出数とゾーン情報を表示
+        info_text = []
+        info_text.append(f"Ally: {len(positions['ally'])} Enemy: {len(positions['enemy'])}")
+        
+        # ゾーンごとのプレイヤー数を計算
+        zones = {
+            'top': {'ally': 0, 'enemy': 0},
+            'mid': {'ally': 0, 'enemy': 0},
+            'bot': {'ally': 0, 'enemy': 0}
         }
         
         for team, pos_list in positions.items():
             for pos in pos_list:
-                cv2.circle(vis_map, pos, 3, colors[team], -1)
-                cv2.circle(vis_map, pos, 5, colors[team], 1)
+                y = pos[1]
+                if y < h/3:
+                    zones['top'][team] += 1
+                elif y < 2*h/3:
+                    zones['mid'][team] += 1
+                else:
+                    zones['bot'][team] += 1
+        
+        # ゾーン情報を追加
+        for zone in ['top', 'mid', 'bot']:
+            if zones[zone]['ally'] > 0 or zones[zone]['enemy'] > 0:
+                info_text.append(f"{zone.upper()}: A{zones[zone]['ally']} E{zones[zone]['enemy']}")
+        
+        # 情報テキストを描画
+        for i, text in enumerate(info_text):
+            y_pos = vis_map.shape[0] - 10 - (i * 15)
+            cv2.putText(vis_map, text,
+                       (10, y_pos),
+                       cv2.FONT_HERSHEY_SIMPLEX,
+                       0.4, (255, 255, 255), 1)
         
         return vis_map
 

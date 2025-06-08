@@ -12,8 +12,8 @@ MODEL_DIR = ROOT_DIR / "models"
 
 
 # フレーム抽出の設定
-FRAME_EXTRACTION_FPS = 2  # 1秒あたりのフレーム数
-FRAME_QUALITY = 95  # JPEGの品質（0-100）
+FRAME_EXTRACTION_FPS = 10  # 1秒あたりのフレーム数を増やす
+FRAME_QUALITY = 100  # JPEGの品質を最大に設定
 
 # 物体検出の設定
 CONFIDENCE_THRESHOLD = 0.5

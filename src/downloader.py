@@ -13,7 +13,7 @@ class VideoDownloader:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         self.ydl_opts = {
-            'format': 'best[height<=1080]',  # 1080p以下の最高品質
+            'format': 'bestvideo[height=1080][ext=mp4]+bestaudio[ext=m4a]/best[height=1080]',  # 1080p固定
             'outtmpl': str(self.output_dir / '%(title)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
