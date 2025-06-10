@@ -3,6 +3,7 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional
 import logging
 from collections import defaultdict
+import pytesseract  # OCRのために追加
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,6 +33,12 @@ MINIMAP_CONSTANTS = {
         'MIN_AREA': 100,     # タワーアイコンの最小面積
         'MAX_AREA': 400,     # タワーアイコンの最大面積
         'ASPECT_RATIO': 0.5  # タワーアイコンのアスペクト比（高さ/幅）
+    },
+    'TIME_ROI': {
+        'x': 0.474,  # 画面中央から少し左
+        'y': 0.0,  # 画面上部
+        'width': 0.05,  # ROIの幅
+        'height': 0.06  # ROIの高さ
     }
 }
 
@@ -44,9 +51,12 @@ class MinimapAnalyzer:
         self.minimap_roi = {
             'x': 0.0,  # 左端から0%
             'y': 0.0,  # 上端から0%
-            'width': 0.18,  # 画面幅の18%
-            'height': 0.30  # 画面高さの30%
+            'width': 0.179,  # 画面幅の１７.9%
+            'height': 0.315  # 画面高さの31.5%
         }
+        
+        # 時間表示のROI
+        self.time_roi = MINIMAP_CONSTANTS['TIME_ROI']
         
         # チームの色定義（HSV形式）
         self.team_colors = {
@@ -296,13 +306,90 @@ class MinimapAnalyzer:
         
         return patterns
 
-    def visualize_minimap(self, minimap: np.ndarray, positions: Dict[str, List[Tuple[int, int]]]) -> np.ndarray:
+    def extract_game_time(self, frame: np.ndarray) -> str:
+        """
+        フレームから試合経過時間を抽出
+
+        Args:
+            frame (np.ndarray): 入力フレーム
+
+        Returns:
+            str: 検出された時間文字列（例: "12:34"）
+        """
+        # フレームの寸法を取得して、ROIの座標を計算する
+        height, width = frame.shape[:2]
+        # TIME_ROIに基づいて、時間表示領域のx, y, width, heightを計算
+        x = int(width * self.time_roi['x'])
+        y = int(height * self.time_roi['y'])
+        w = int(width * self.time_roi['width'])
+        h = int(height * self.time_roi['height'])
+        
+        # 指定されたROIから時間表示領域を抽出
+        time_area = frame[y:y+h, x:x+w]
+        
+        # 画像をグレースケールに変換して二値化処理を行う
+        gray = cv2.cvtColor(time_area, cv2.COLOR_BGR2GRAY)
+        _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+        
+        # カーネルを使用してエロージョン、ディレーション、クロージングでノイズを除去
+        kernel = np.ones((3,3), np.uint8)
+        binary = cv2.erode(binary, kernel, iterations=1)
+        binary = cv2.dilate(binary, kernel, iterations=1)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        
+        try:
+            # pytesseractでテキストを抽出（数字とコロンだけを対象し、OCRエンジンを最適化）
+            text = pytesseract.image_to_string(binary, config='--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789:')
+            logger.info(f"Extracted text: {text}")  # 抽出されたテキストをログ出力
+            import re
+            match = re.search(r'\d{1,2}:\d{2}', text)
+            if match:
+                logger.info(f"Matched game time: {match.group(0)}")  # マッチした時間をログ出力
+                return match.group(0)
+            else:
+                logger.warning("No time pattern matched")
+                return ""
+        except Exception as e:
+            logger.error(f"Time detection error: {e}")  # エラーをログ出力
+            return ""
+
+    def process_frame(self, frame: np.ndarray, frame_number: int) -> Tuple[np.ndarray, Dict[str, List[Tuple[int, int]]], str]:
+        """
+        フレームを処理してミニマップ分析を実行
+
+        Args:
+            frame (np.ndarray): 入力フレーム
+            frame_number (int): フレーム番号
+
+        Returns:
+            Tuple[np.ndarray, Dict[str, List[Tuple[int, int]]], str]: 
+            可視化されたミニマップ、検出された位置情報、ゲーム経過時間
+        """
+        # ミニマップ領域の抽出
+        minimap = self.extract_minimap(frame)
+        
+        # チームの位置を検出
+        positions = self.detect_team_positions(minimap)
+        
+        # 移動履歴の更新
+        self.update_movement_history(positions, frame_number)
+        
+        # 経過時間の検出
+        game_time = self.extract_game_time(frame)
+        
+        # 結果の可視化（時間情報も追加）
+        vis_map = self.visualize_minimap(minimap, positions, game_time)
+        
+        return vis_map, positions, game_time
+
+    def visualize_minimap(self, minimap: np.ndarray, positions: Dict[str, List[Tuple[int, int]]], game_time: str = "") -> np.ndarray:
         """
         ミニマップ上の検出結果を可視化
 
         Args:
             minimap (np.ndarray): ミニマップ画像
             positions (Dict[str, List[Tuple[int, int]]]): チームごとの位置座標
+            game_time (str): 検出された試合経過時間
 
         Returns:
             np.ndarray: 可視化されたミニマップ
@@ -368,6 +455,10 @@ class MinimapAnalyzer:
             if zones[zone]['ally'] > 0 or zones[zone]['enemy'] > 0:
                 info_text.append(f"{zone.upper()}: A{zones[zone]['ally']} E{zones[zone]['enemy']}")
         
+        # 時間情報を追加
+        if game_time:
+            info_text.insert(0, f"Time: {game_time}")
+        
         # 情報テキストを描画
         for i, text in enumerate(info_text):
             y_pos = vis_map.shape[0] - 10 - (i * 15)
@@ -376,30 +467,4 @@ class MinimapAnalyzer:
                        cv2.FONT_HERSHEY_SIMPLEX,
                        0.4, (255, 255, 255), 1)
         
-        return vis_map
-
-    def process_frame(self, frame: np.ndarray, frame_number: int) -> Tuple[np.ndarray, Dict[str, List[Tuple[int, int]]]]:
-        """
-        フレームを処理してミニマップ分析を実行
-
-        Args:
-            frame (np.ndarray): 入力フレーム
-            frame_number (int): フレーム番号
-
-        Returns:
-            Tuple[np.ndarray, Dict[str, List[Tuple[int, int]]]]: 
-            可視化されたミニマップと検出された位置情報
-        """
-        # ミニマップ領域の抽出
-        minimap = self.extract_minimap(frame)
-        
-        # チームの位置を検出
-        positions = self.detect_team_positions(minimap)
-        
-        # 移動履歴の更新
-        self.update_movement_history(positions, frame_number)
-        
-        # 結果の可視化
-        vis_map = self.visualize_minimap(minimap, positions)
-        
-        return vis_map, positions 
+        return vis_map 

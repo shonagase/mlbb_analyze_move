@@ -47,7 +47,7 @@ else:
             with st.spinner("Downloading video..."):
                 # yt-dlpの設定
                 ydl_opts = {
-                    'format': 'best[height<=720]',  # 720p以下の最高品質
+                    'format': 'best',  # 最高品質の動画をダウンロード（以前は720p以下だったものを変更）
                     'outtmpl': 'temp_video.%(ext)s'
                 }
                 
@@ -97,7 +97,38 @@ if video_path is not None and video_path.exists():
         
         with col1:
             st.subheader("Original Frame")
-            st.image(frame_rgb, use_container_width=True)
+            # 経過時間の検出と表示
+            game_time = analyzer.extract_game_time(frame)
+            if game_time:
+                st.write(f"Game Time: {game_time}")
+            
+            # 時間表示領域の可視化
+            frame_with_roi = frame_rgb.copy()
+            height, width = frame.shape[:2]
+            x = int(width * analyzer.time_roi['x'])
+            y = int(height * analyzer.time_roi['y'])
+            w = int(width * analyzer.time_roi['width'])
+            h = int(height * analyzer.time_roi['height'])
+            
+            # ROIを赤枠で表示
+            cv2.rectangle(frame_with_roi, (x, y), (x+w, y+h), (255, 0, 0), 2)
+            
+            # ROI部分を切り出して表示
+            time_area = frame_rgb[y:y+h, x:x+w]
+            
+            # メインフレームとROI領域を表示
+            st.image(frame_with_roi, use_container_width=True)
+            st.write("Time Display Region (ROI):")
+            st.image(time_area, use_container_width=False)
+            
+            # ROIの前処理結果を表示（デバッグ用）
+            time_area_gray = cv2.cvtColor(frame[y:y+h, x:x+w], cv2.COLOR_BGR2GRAY)
+            _, time_area_binary = cv2.threshold(time_area_gray, 200, 255, cv2.THRESH_BINARY)
+            kernel = np.ones((2,2), np.uint8)
+            time_area_processed = cv2.morphologyEx(time_area_binary, cv2.MORPH_CLOSE, kernel)
+            
+            st.write("Processed Time Display Region:")
+            st.image(time_area_processed, use_container_width=False)
         
         with col2:
             st.subheader("Analysis Results")
@@ -122,8 +153,8 @@ if video_path is not None and video_path.exists():
                             st.write(f"- Ally positions: {len(positions['ally'])}")
                             st.write(f"- Enemy positions: {len(positions['enemy'])}")
                             
-                            # 位置の可視化
-                            visualized_minimap = analyzer.visualize_minimap(minimap, positions)
+                            # 位置の可視化（経過時間も含める）
+                            visualized_minimap = analyzer.visualize_minimap(minimap, positions, game_time)
                             visualized_minimap_rgb = cv2.cvtColor(visualized_minimap, cv2.COLOR_BGR2RGB)
                             st.image(visualized_minimap_rgb, caption="Team Positions", use_container_width=True)
                             
