@@ -1,0 +1,11 @@
+services:
+  mlbb-analyzer:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./base_picture:/app/base_picture
+      - ./temp:/app/temp
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped 

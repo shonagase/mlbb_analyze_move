@@ -5,17 +5,22 @@ import os
 from pathlib import Path
 import yt_dlp
 from src.minimap_analyzer import MinimapAnalyzer
+import warnings
+
+# 警告メッセージを非表示にする
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
+
+# tempディレクトリの作成
+TEMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp")
+os.makedirs(TEMP_DIR, exist_ok=True)
+TEMP_VIDEO_PATH = os.path.join(TEMP_DIR, "temp_video.mp4")
 
 # 初期化
 if 'current_frame' not in st.session_state:
     st.session_state.current_frame = 0
 
 st.title("MLBB Minimap Analyzer")
-
-# 一時ファイルのパスを設定
-TEMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp")
-os.makedirs(TEMP_DIR, exist_ok=True)
-TEMP_VIDEO_PATH = os.path.join(TEMP_DIR, "temp_video.mp4")
 
 # 入力方法の選択
 input_method = st.sidebar.radio("Select Input Method", ["File Upload", "YouTube URL"])
@@ -37,16 +42,35 @@ else:
     if youtube_url:
         try:
             with st.spinner('Downloading video...'):
+                # 一時ファイルが存在する場合は削除
+                if os.path.exists(TEMP_VIDEO_PATH):
+                    os.remove(TEMP_VIDEO_PATH)
+                if os.path.exists(TEMP_VIDEO_PATH + '.part'):
+                    os.remove(TEMP_VIDEO_PATH + '.part')
+                
                 ydl_opts = {
                     'format': 'best',
                     'outtmpl': TEMP_VIDEO_PATH,
                     'cookiesfrombrowser': ('chrome',),
+                    'quiet': True,
+                    'no_warnings': True,
+                    'noprogress': True,
                 }
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(youtube_url, download=True)
-                    video_path = TEMP_VIDEO_PATH
+                
+                # ダウンロードを試行
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(youtube_url, download=True)
+                        if os.path.exists(TEMP_VIDEO_PATH):
+                            video_path = TEMP_VIDEO_PATH
+                        else:
+                            st.error("Failed to download video: Output file not found")
+                            video_path = None
+                except Exception as e:
+                    st.error(f"Error during download: {str(e)}")
+                    video_path = None
         except Exception as e:
-            st.error(f"Error downloading video: {str(e)}")
+            st.error(f"Error initializing download: {str(e)}")
             video_path = None
 
 if video_path and os.path.exists(video_path):

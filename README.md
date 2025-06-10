@@ -15,7 +15,23 @@ Mobile Legends: Bang Bang（MLBB）の試合動画を分析するツールです
 - Streamlitベースのユーザーインターフェース
 - 分析結果のJSON形式での保存
 
-## インストール
+## 必要条件
+
+### ローカル環境での実行
+
+- Python 3.12以上
+- OpenCV
+- Tesseract OCR
+- その他requirements.txtに記載のパッケージ
+
+### Docker環境での実行
+
+- Docker
+- Docker Compose
+
+## インストール方法
+
+### ローカル環境
 
 1. リポジトリをクローン
 ```bash
@@ -36,12 +52,30 @@ source .venv/bin/activate  # Linux/Mac
 pip install -r requirements.txt
 ```
 
+### Docker環境
+
+1. リポジトリをクローン
+```bash
+git clone https://github.com/shonagase/mlbb_analyze_move.git
+cd mlbb_analyze_move
+```
+
+2. Dockerイメージをビルドして起動
+```bash
+docker-compose up --build
+```
+
 ## 使用方法
 
 1. アプリケーションを起動
-```bash
-streamlit run app.py
-```
+   - ローカル環境の場合：
+     ```bash
+     streamlit run app.py
+     ```
+   - Docker環境の場合：
+     ```bash
+     docker-compose up
+     ```
 
 2. ブラウザで表示されるインターフェースから：
    - YouTubeのURLを入力するか、ローカルの動画ファイルをアップロード
