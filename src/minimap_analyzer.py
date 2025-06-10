@@ -7,6 +7,7 @@ import pytesseract  # OCRのために追加
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from sklearn.cluster import DBSCAN
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -115,9 +116,16 @@ class MinimapAnalyzer:
         self.threshold = 30
         self.min_area = 50
         self.max_area = 500
+        self.target_size = (200, 200)
+        
+        # ベース画像を読み込む
         self.base_minimap = cv2.imread('/Users/shoyanagatomo/Documents/git/mlbb_analyze_move/base_picture/Minimap.webp')
         if self.base_minimap is not None:
-            self.base_minimap = cv2.resize(self.base_minimap, (200, 200))
+            self.base_minimap = cv2.resize(self.base_minimap, self.target_size)
+
+        # オブジェクトマスクの作成
+        if self.base_minimap is not None:
+            self.object_mask = self._create_object_mask()
 
     def _is_player_icon(self, contour: np.ndarray) -> bool:
         """
@@ -349,42 +357,42 @@ class MinimapAnalyzer:
         Returns:
             str: 検出された時間文字列（例: "12:34"）
         """
-        # フレームの寸法を取得して、ROIの座標を計算する
-        height, width = frame.shape[:2]
-        # TIME_ROIに基づいて、時間表示領域のx, y, width, heightを計算
-        x = int(width * self.time_roi['x'])
-        y = int(height * self.time_roi['y'])
-        w = int(width * self.time_roi['width'])
-        h = int(height * self.time_roi['height'])
-        
-        # 指定されたROIから時間表示領域を抽出
-        time_area = frame[y:y+h, x:x+w]
-        
-        # 画像をグレースケールに変換して二値化処理を行う
-        gray = cv2.cvtColor(time_area, cv2.COLOR_BGR2GRAY)
-        _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
-        
-        # カーネルを使用してエロージョン、ディレーション、クロージングでノイズを除去
-        kernel = np.ones((3,3), np.uint8)
-        binary = cv2.erode(binary, kernel, iterations=1)
-        binary = cv2.dilate(binary, kernel, iterations=1)
-        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-        
         try:
-            # pytesseractでテキストを抽出（数字とコロンだけを対象し、OCRエンジンを最適化）
-            text = pytesseract.image_to_string(binary, config='--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789:')
-            logger.info(f"Extracted text: {text}")  # 抽出されたテキストをログ出力
+            height, width = frame.shape[:2]
+            
+            # ROIの座標を計算
+            x = int(width * self.time_roi['x'])
+            y = int(height * self.time_roi['y'])
+            w = int(width * self.time_roi['width'])
+            h = int(height * self.time_roi['height'])
+            
+            # ROI領域を切り出し
+            time_area = frame[y:y+h, x:x+w]
+            
+            # グレースケールに変換
+            gray = cv2.cvtColor(time_area, cv2.COLOR_BGR2GRAY)
+            
+            # 二値化
+            _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+            
+            # ノイズ除去
+            kernel = np.ones((2,2), np.uint8)
+            processed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+            
+            # OCRで時間を抽出
+            text = pytesseract.image_to_string(processed, config='--psm 7 -c tessedit_char_whitelist=0123456789:')
+            
+            # 時間形式（mm:ss）の文字列を抽出
             import re
-            match = re.search(r'\d{1,2}:\d{2}', text)
-            if match:
-                logger.info(f"Matched game time: {match.group(0)}")  # マッチした時間をログ出力
-                return match.group(0)
-            else:
-                logger.warning("No time pattern matched")
-                return ""
+            time_match = re.search(r'\d{1,2}:\d{2}', text)
+            
+            if time_match:
+                return time_match.group(0)
+            return None
+            
         except Exception as e:
-            logger.error(f"Time detection error: {e}")  # エラーをログ出力
-            return ""
+            logging.error(f"Error extracting game time: {str(e)}")
+            return None
 
     def process_frame(self, frame: np.ndarray, frame_number: int) -> Tuple[np.ndarray, Dict[str, List[Tuple[int, int]]], str]:
         """
@@ -664,7 +672,7 @@ class MinimapAnalyzer:
             return None, {"error": "Base minimap not loaded"}
 
         # 現在のミニマップをベースミニマップと同じサイズにリサイズ
-        current_minimap = cv2.resize(current_minimap, (200, 200))
+        current_minimap = cv2.resize(current_minimap, self.target_size)
 
         # グレースケールに変換
         base_gray = cv2.cvtColor(self.base_minimap, cv2.COLOR_BGR2GRAY)
@@ -712,4 +720,649 @@ class MinimapAnalyzer:
             "total_diff_area": sum(area["area"] for area in diff_areas)
         }
 
-        return diff_map, diff_stats 
+        return diff_map, diff_stats
+
+    def analyze_map_changes(self, current_minimap):
+        """
+        現在のミニマップを3つのベース画像と比較して変化を分析する
+        
+        Args:
+            current_minimap: 現在のフレームから抽出したミニマップ画像
+            
+        Returns:
+            dict: 分析結果を含む辞書
+        """
+        current_minimap = cv2.resize(current_minimap, self.target_size)
+        
+        # 1. 地形との比較（固定オブジェクトの検出）
+        terrain_diff, terrain_stats = self._compare_images(self.base_minimap, current_minimap)
+        
+        # 2. オブジェクトありの画像との比較（動的オブジェクトの検出）
+        objects_diff, objects_stats = self._compare_images(self.base_minimap, current_minimap)
+        
+        # 3. バトル状態の画像との比較（キャラクターの移動検出）
+        battle_diff, battle_stats = self._compare_images(self.base_minimap, current_minimap)
+        
+        # 変化領域の分類
+        classified_changes = self._classify_changes(
+            terrain_stats['diff_areas'],
+            objects_stats['diff_areas'],
+            battle_stats['diff_areas']
+        )
+        
+        return {
+            'terrain_comparison': {
+                'diff_map': terrain_diff,
+                'stats': terrain_stats
+            },
+            'objects_comparison': {
+                'diff_map': objects_diff,
+                'stats': objects_stats
+            },
+            'battle_comparison': {
+                'diff_map': battle_diff,
+                'stats': battle_stats
+            },
+            'classified_changes': classified_changes
+        }
+
+    def _compare_images(self, base_img, current_img):
+        """
+        2つの画像を比較し、差分を検出する
+        """
+        if base_img is None:
+            return None, {"error": "Base image not loaded"}
+
+        # グレースケールに変換
+        base_gray = cv2.cvtColor(base_img, cv2.COLOR_BGR2GRAY)
+        current_gray = cv2.cvtColor(current_img, cv2.COLOR_BGR2GRAY)
+
+        # 差分を計算
+        diff = cv2.absdiff(base_gray, current_gray)
+        
+        # 閾値処理
+        _, thresh = cv2.threshold(diff, self.threshold, 255, cv2.THRESH_BINARY)
+        
+        # ノイズ除去
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, self.kernel_size)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+
+        # 差分領域の検出
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # 差分の可視化
+        diff_map = current_img.copy()
+        diff_areas = []
+        
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if self.min_area < area < self.max_area:
+                # 差分領域の中心を計算
+                M = cv2.moments(contour)
+                if M["m00"] != 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                    
+                    # 差分領域を赤色で描画
+                    cv2.drawContours(diff_map, [contour], -1, (0, 0, 255), 2)
+                    cv2.circle(diff_map, (cx, cy), 3, (255, 0, 0), -1)
+                    
+                    diff_areas.append({
+                        "center": (cx, cy),
+                        "area": area,
+                        "contour": contour.tolist()
+                    })
+
+        return diff_map, {
+            "total_differences": len(diff_areas),
+            "diff_areas": diff_areas,
+            "total_diff_area": sum(area["area"] for area in diff_areas)
+        }
+
+    def _classify_changes(self, terrain_changes, object_changes, battle_changes):
+        """
+        検出された変化を分類する
+        """
+        def calculate_overlap(area1, area2):
+            # 中心点間の距離で簡易的な重なり判定
+            c1 = np.array(area1["center"])
+            c2 = np.array(area2["center"])
+            return np.linalg.norm(c1 - c2)
+
+        classified = {
+            "static_objects": [],  # 地形との比較でのみ検出された変化
+            "dynamic_objects": [], # オブジェクトありの画像との比較で新たに検出された変化
+            "characters": [],      # バトル画像との比較で新たに検出された変化
+            "movements": []        # 前フレームからの移動
+        }
+
+        # 重なり判定の閾値
+        overlap_threshold = 20
+
+        # 地形との差分をまず静的オブジェクトとして分類
+        for change in terrain_changes:
+            classified["static_objects"].append({
+                "position": change["center"],
+                "size": change["area"],
+                "type": "static"
+            })
+
+        # オブジェクトありの画像との差分を動的オブジェクトとして分類
+        for change in object_changes:
+            is_new = True
+            for static in classified["static_objects"]:
+                if calculate_overlap(change, {"center": static["position"]}) < overlap_threshold:
+                    is_new = False
+                    break
+            if is_new:
+                classified["dynamic_objects"].append({
+                    "position": change["center"],
+                    "size": change["area"],
+                    "type": "dynamic"
+                })
+
+        # バトル画像との差分をキャラクターとして分類
+        for change in battle_changes:
+            is_new = True
+            for existing in (classified["static_objects"] + classified["dynamic_objects"]):
+                if calculate_overlap(change, {"center": existing["position"]}) < overlap_threshold:
+                    is_new = False
+                    break
+            if is_new:
+                classified["characters"].append({
+                    "position": change["center"],
+                    "size": change["area"],
+                    "direction": change["angle"],
+                    "type": "character"
+                })
+
+        return classified 
+
+    def _create_object_mask(self):
+        """
+        固定オブジェクトのマスクを作成
+        """
+        if self.base_minimap is None:
+            return None
+            
+        # グレースケールに変換
+        gray = cv2.cvtColor(self.base_minimap, cv2.COLOR_BGR2GRAY)
+        
+        # 二値化
+        _, thresh = cv2.threshold(gray, self.threshold, 255, cv2.THRESH_BINARY)
+        
+        # ノイズ除去
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, self.kernel_size)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+        
+        # オブジェクト領域を検出
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # マスク画像を作成（3チャンネル）
+        mask = np.zeros_like(self.base_minimap)
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if self.min_area < area < self.max_area:
+                # オブジェクト領域を少し拡大してマージン追加
+                cv2.drawContours(mask, [contour], -1, (255, 255, 255), 3)
+        
+        return mask
+
+    def analyze_character_movement(self, current_minimap, prev_minimap=None):
+        """
+        キャラクターの動きを分析する
+        
+        Args:
+            current_minimap: 現在のフレームのミニマップ
+            prev_minimap: 前のフレームのミニマップ（オプション）
+            
+        Returns:
+            dict: 分析結果
+        """
+        if self.object_mask is None:
+            return {"error": "Object mask not created"}
+            
+        current_minimap = cv2.resize(current_minimap, self.target_size)
+        
+        # オブジェクトマスクを使用して固定オブジェクトを除外
+        masked_current = cv2.bitwise_and(current_minimap, current_minimap, 
+                                       mask=cv2.bitwise_not(self.object_mask))
+        
+        # キャラクター検出
+        characters = self._detect_characters(masked_current)
+        
+        # 前フレームが提供された場合は移動を分析
+        movement_analysis = None
+        if prev_minimap is not None:
+            prev_minimap = cv2.resize(prev_minimap, self.target_size)
+            masked_prev = cv2.bitwise_and(prev_minimap, prev_minimap, 
+                                        mask=cv2.bitwise_not(self.object_mask))
+            movement_analysis = self._analyze_movement(masked_prev, masked_current)
+        
+        return {
+            'characters': characters,
+            'movement': movement_analysis,
+            'visualization': {
+                'masked_map': masked_current,
+                'character_positions': self._visualize_characters(current_minimap, characters)
+            }
+        }
+
+    def _detect_characters(self, masked_image):
+        """
+        マスク済み画像からキャラクターを検出
+        """
+        # グレースケールに変換
+        gray = cv2.cvtColor(masked_image, cv2.COLOR_BGR2GRAY)
+        
+        # 二値化
+        _, thresh = cv2.threshold(gray, self.threshold, 255, cv2.THRESH_BINARY)
+        
+        # ノイズ除去
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, self.kernel_size)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+        
+        # キャラクター領域を検出
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        characters = []
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if self.min_area < area < self.max_area:
+                M = cv2.moments(contour)
+                if M["m00"] != 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                    
+                    # 向きを計算
+                    rect = cv2.minAreaRect(contour)
+                    
+                    characters.append({
+                        "position": (cx, cy),
+                        "area": area,
+                        "direction": rect[-1],
+                        "contour": contour
+                    })
+        
+        return characters
+
+    def _analyze_movement(self, prev_image, current_image):
+        """
+        2フレーム間のキャラクターの移動を分析
+        """
+        prev_chars = self._detect_characters(prev_image)
+        current_chars = self._detect_characters(current_image)
+        
+        movements = []
+        
+        # 各キャラクターの移動を追跡
+        for prev_char in prev_chars:
+            min_dist = float('inf')
+            matched_char = None
+            
+            for curr_char in current_chars:
+                dist = np.linalg.norm(
+                    np.array(prev_char["position"]) - np.array(curr_char["position"])
+                )
+                if dist < min_dist and dist < 50:  # 50ピクセルを最大移動距離とする
+                    min_dist = dist
+                    matched_char = curr_char
+            
+            if matched_char:
+                movement = {
+                    "start": prev_char["position"],
+                    "end": matched_char["position"],
+                    "distance": min_dist,
+                    "direction_change": matched_char["direction"] - prev_char["direction"],
+                    "speed": min_dist  # フレーム間の距離を速度として使用
+                }
+                movements.append(movement)
+        
+        return {
+            "total_movements": len(movements),
+            "movements": movements,
+            "average_speed": np.mean([m["speed"] for m in movements]) if movements else 0
+        }
+
+    def _visualize_characters(self, original_image, characters):
+        """
+        検出されたキャラクターを可視化
+        """
+        vis_image = original_image.copy()
+        
+        for char in characters:
+            # キャラクターの位置を円で表示
+            cv2.circle(vis_image, char["position"], 5, (0, 255, 0), -1)
+            
+            # 向きを矢印で表示
+            angle_rad = np.deg2rad(char["direction"])
+            arrow_length = 20
+            end_point = (
+                int(char["position"][0] + arrow_length * np.cos(angle_rad)),
+                int(char["position"][1] + arrow_length * np.sin(angle_rad))
+            )
+            cv2.arrowedLine(vis_image, char["position"], end_point, (255, 0, 0), 2)
+            
+            # キャラクター領域を表示
+            cv2.drawContours(vis_image, [char["contour"]], -1, (0, 255, 0), 2)
+        
+        return vis_image 
+
+    def analyze_character_movement_sequence(self, current_frame_number, cap, fps=15, window_size=15):
+        """
+        現在のフレームの前後のフレームを使用してキャラクターの動きを分析する
+        
+        Args:
+            current_frame_number: 現在のフレーム番号
+            cap: VideoCapture オブジェクト
+            fps: 1秒あたりのフレーム数
+            window_size: 前後何フレームまで見るか
+            
+        Returns:
+            dict: 分析結果
+        """
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        # 前後のフレーム番号を計算
+        start_frame = max(0, current_frame_number - window_size)
+        end_frame = min(total_frames - 1, current_frame_number + window_size)
+        
+        # フレームシーケンスを取得
+        frames = []
+        minimaps = []
+        frame_positions = []
+        
+        for frame_num in range(start_frame, end_frame + 1):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+            ret, frame = cap.read()
+            if ret:
+                minimap = self.extract_minimap(frame)
+                if minimap is not None:
+                    frames.append(frame)
+                    minimaps.append(minimap)
+                    frame_positions.append(frame_num)
+        
+        if not minimaps:
+            return {"error": "No valid frames found"}
+        
+        # 動きの分析
+        movement_analysis = self._analyze_sequence_movement(minimaps, frame_positions)
+        
+        # 現在のフレームに戻す
+        cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame_number)
+        
+        return movement_analysis
+
+    def _analyze_sequence_movement(self, minimaps, frame_positions):
+        """
+        フレームシーケンスから動きを分析する
+        """
+        if not minimaps:
+            return {"error": "No minimaps provided"}
+            
+        # 各フレームのキャラクター位置を追跡
+        character_tracks = []
+        movement_heatmap = np.zeros(self.target_size, dtype=np.float32)
+        
+        # 各フレームでキャラクターを検出
+        frame_characters = []
+        for minimap in minimaps:
+            # オブジェクトマスクを適用
+            if self.object_mask is not None:
+                # マスクを現在のミニマップと同じサイズにリサイズ
+                resized_mask = cv2.resize(self.object_mask, (minimap.shape[1], minimap.shape[0]))
+                # マスクを反転（オブジェクト以外の領域を取得）
+                inverted_mask = cv2.bitwise_not(resized_mask)
+                # マスク処理
+                masked_minimap = cv2.bitwise_and(minimap, inverted_mask)
+            else:
+                masked_minimap = minimap.copy()
+            
+            chars = self._detect_characters(masked_minimap)
+            frame_characters.append(chars)
+        
+        # キャラクターの軌跡を追跡
+        for i in range(len(frame_characters)):
+            current_chars = frame_characters[i]
+            
+            for char in current_chars:
+                track = {
+                    "start_frame": frame_positions[i],
+                    "positions": [(frame_positions[i], char["position"])],
+                    "directions": [(frame_positions[i], char["direction"])]
+                }
+                
+                # 後続フレームでの位置を追跡
+                for j in range(i + 1, len(frame_characters)):
+                    next_chars = frame_characters[j]
+                    best_match = None
+                    min_dist = float('inf')
+                    
+                    for next_char in next_chars:
+                        dist = np.linalg.norm(
+                            np.array(char["position"]) - np.array(next_char["position"])
+                        )
+                        if dist < min_dist and dist < 50:  # 50ピクセルを最大移動距離とする
+                            min_dist = dist
+                            best_match = next_char
+                    
+                    if best_match:
+                        track["positions"].append((frame_positions[j], best_match["position"]))
+                        track["directions"].append((frame_positions[j], best_match["direction"]))
+                        
+                        # ヒートマップを更新
+                        pt1 = np.array(char["position"])
+                        pt2 = np.array(best_match["position"])
+                        cv2.line(movement_heatmap, 
+                                tuple(pt1.astype(int)), 
+                                tuple(pt2.astype(int)), 
+                                1.0, 
+                                2)
+                
+                if len(track["positions"]) > 1:  # 2フレーム以上で追跡できた場合のみ追加
+                    character_tracks.append(track)
+        
+        # ヒートマップの正規化と可視化
+        if movement_heatmap.max() > 0:
+            movement_heatmap = (movement_heatmap / movement_heatmap.max() * 255).astype(np.uint8)
+            movement_heatmap = cv2.applyColorMap(movement_heatmap, cv2.COLORMAP_JET)
+        
+        # 軌跡の可視化
+        trajectory_map = minimaps[len(minimaps)//2].copy()  # 中央のフレームを使用
+        for track in character_tracks:
+            positions = [pos[1] for pos in track["positions"]]
+            for i in range(len(positions) - 1):
+                pt1 = positions[i]
+                pt2 = positions[i + 1]
+                # 移動の軌跡を描画（時間経過で色を変える）
+                color_factor = i / (len(positions) - 1)
+                color = (
+                    int(255 * (1 - color_factor)),  # Blue
+                    int(255 * color_factor),        # Green
+                    0                               # Red
+                )
+                cv2.line(trajectory_map, pt1, pt2, color, 2)
+                # 各位置にポイントを描画
+                cv2.circle(trajectory_map, pt1, 3, color, -1)
+            if positions:
+                cv2.circle(trajectory_map, positions[-1], 3, (0, 255, 0), -1)
+        
+        return {
+            "tracks": character_tracks,
+            "total_tracks": len(character_tracks),
+            "frame_range": (frame_positions[0], frame_positions[-1]),
+            "visualization": {
+                "heatmap": movement_heatmap,
+                "trajectory": trajectory_map
+            },
+            "movement_statistics": self._calculate_movement_statistics(character_tracks)
+        }
+
+    def _calculate_movement_statistics(self, tracks):
+        """
+        軌跡から移動統計を計算
+        """
+        stats = {
+            "average_speed": [],
+            "total_distance": [],
+            "direction_changes": [],
+            "movement_patterns": []
+        }
+        
+        for track in tracks:
+            positions = [pos[1] for pos in track["positions"]]
+            frames = [pos[0] for pos in track["positions"]]
+            directions = [dir[1] for dir in track["directions"]]
+            
+            # 総移動距離と平均速度
+            total_dist = 0
+            speeds = []
+            for i in range(len(positions) - 1):
+                pt1 = np.array(positions[i])
+                pt2 = np.array(positions[i + 1])
+                dist = np.linalg.norm(pt2 - pt1)
+                frame_diff = frames[i + 1] - frames[i]
+                if frame_diff > 0:
+                    speed = dist / frame_diff
+                    speeds.append(speed)
+                total_dist += dist
+            
+            # 方向変化
+            direction_changes = []
+            for i in range(len(directions) - 1):
+                change = directions[i + 1] - directions[i]
+                # 角度の正規化（-180から180の範囲に）
+                if change > 180:
+                    change -= 360
+                elif change < -180:
+                    change += 360
+                direction_changes.append(change)
+            
+            stats["average_speed"].append(np.mean(speeds) if speeds else 0)
+            stats["total_distance"].append(total_dist)
+            stats["direction_changes"].append(direction_changes)
+            
+            # 移動パターンの分類
+            if total_dist < 10:
+                pattern = "stationary"
+            elif len(set(direction_changes)) <= 2:
+                pattern = "linear"
+            else:
+                pattern = "complex"
+            stats["movement_patterns"].append(pattern)
+        
+        return {
+            "average_speed": np.mean(stats["average_speed"]),
+            "max_speed": np.max(stats["average_speed"]) if stats["average_speed"] else 0,
+            "average_distance": np.mean(stats["total_distance"]) if stats["total_distance"] else 0,
+            "movement_patterns": {
+                pattern: stats["movement_patterns"].count(pattern)
+                for pattern in set(stats["movement_patterns"])
+            }
+        } 
+
+    def analyze_time_series(self, video_capture, start_frame, duration_seconds, fps=30):
+        """
+        指定された時間範囲内でのミニマップ上の動きを分析する
+        
+        Args:
+            video_capture: cv2.VideoCapture オブジェクト
+            start_frame: 開始フレーム番号
+            duration_seconds: 分析する時間（秒）
+            fps: ビデオのFPS（デフォルト30）
+            
+        Returns:
+            movement_map: 時系列での動きを可視化した画像
+            time_stats: 時間ごとの統計情報
+        """
+        total_frames = int(duration_seconds * fps)
+        movement_map = np.zeros(self.target_size + (3,), dtype=np.uint8)
+        time_stats = {
+            "total_movements": 0,
+            "time_segments": [],
+            "hot_zones": []
+        }
+        
+        # 色相の範囲を計算（時間経過を色で表現）
+        hue_step = 180 / total_frames
+        
+        # 開始フレームに移動
+        video_capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        
+        for frame_idx in range(total_frames):
+            ret, frame = video_capture.read()
+            if not ret:
+                break
+                
+            # 現在のフレームのミニマップを分析
+            current_minimap = self.extract_minimap(frame)
+            diff_map, diff_stats = self.compare_with_base(current_minimap)
+            
+            if diff_stats['total_differences'] > 0:
+                # 時間に基づいて色を生成（HSVカラースペース）
+                hue = int(frame_idx * hue_step)
+                color = cv2.cvtColor(np.uint8([[[hue, 255, 255]]]), cv2.COLOR_HSV2BGR)[0][0]
+                
+                # 動きを検出した領域を描画
+                for area in diff_stats['diff_areas']:
+                    center = area['center']
+                    # 中心点を描画（時間経過で色が変化）
+                    cv2.circle(movement_map, center, 2, color.tolist(), -1)
+                    
+                    # 統計情報を記録
+                    time_segment = {
+                        "frame": start_frame + frame_idx,
+                        "time": frame_idx / fps,
+                        "position": center,
+                        "area": area['area']
+                    }
+                    time_stats["time_segments"].append(time_segment)
+                    time_stats["total_movements"] += 1
+        
+        # ホットゾーンの検出（よく動きが検出される領域）
+        if time_stats["time_segments"]:
+            positions = np.array([segment["position"] for segment in time_stats["time_segments"]])
+            hot_zones = self._detect_hot_zones(positions)
+            time_stats["hot_zones"] = hot_zones
+        
+        return movement_map, time_stats
+        
+    def _detect_hot_zones(self, positions, min_points=5, eps=10):
+        """
+        DBSCANを使用してホットゾーン（頻繁に動きが検出される領域）を検出
+        
+        Args:
+            positions: 動きが検出された位置の配列
+            min_points: クラスタを形成するための最小ポイント数
+            eps: クラスタ半径
+            
+        Returns:
+            hot_zones: 検出されたホットゾーンのリスト
+        """
+        if len(positions) < min_points:
+            return []
+            
+        # DBSCANでクラスタリング
+        clustering = DBSCAN(eps=eps, min_samples=min_points).fit(positions)
+        
+        hot_zones = []
+        unique_labels = set(clustering.labels_)
+        
+        for label in unique_labels:
+            if label == -1:  # ノイズポイントをスキップ
+                continue
+                
+            # クラスタに属する点を抽出
+            cluster_points = positions[clustering.labels_ == label]
+            
+            # クラスタの中心と範囲を計算
+            center = np.mean(cluster_points, axis=0)
+            radius = np.max(np.linalg.norm(cluster_points - center, axis=1))
+            
+            hot_zones.append({
+                "center": tuple(map(int, center)),
+                "radius": int(radius),
+                "point_count": len(cluster_points)
+            })
+            
+        return hot_zones 
