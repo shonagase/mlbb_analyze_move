@@ -157,4 +157,72 @@ docker-compose up --build
 ## ライセンス
 
 MIT License
- 
+
+ # English
+
+ # MLBB Move Analyzer
+
+**MLBB Move Analyzer** is a tool for analyzing *Mobile Legends: Bang Bang (MLBB)* match videos.  
+It detects player positions on the minimap and visualizes team movement to assist tactical review and analysis.
+
+![Heatmap Screenshot](https://github.com/user-attachments/assets/a4b71650-d883-45b2-bcf5-c1515fe544ae)
+
+---
+
+## 🚀 Features
+
+- 📹 Supports video input via YouTube URL or local file
+- 🧭 Minimap player detection:
+  - Identifies blue team (allies) and red team (enemies)
+  - Tracks player icons frame-by-frame
+  - Analyzes movement using a 3x3 grid zone system
+- 📊 Visualization:
+  - Labels players as A1–A5 (blue) and E1–E5 (red)
+  - Displays player counts per zone
+- 🌐 Streamlit-powered UI
+- 💾 Saves analysis output in JSON format
+
+---
+
+## ⚠ Known Issues
+
+Minimap resolution may cause detection inaccuracies:  
+- Turrets and jungle monsters may be misidentified as players  
+💡 Tip: Focus on continuously moving objects in the heatmap to better identify actual players.
+
+---
+
+## 📦 Requirements
+
+### Local Environment
+- Python 3.12+
+- OpenCV
+- Tesseract OCR
+- Packages listed in `requirements.txt`
+
+### Docker
+- Docker
+- Docker Compose
+
+---
+
+## 🔧 Installation
+
+### Local Setup
+
+```bash
+git clone https://github.com/[your-username]/mlbb_analyze_move.git
+cd mlbb_analyze_move
+
+python -m venv .venv
+source .venv/bin/activate  # For Linux/Mac
+# or
+.venv\Scripts\activate     # For Windows
+
+pip install -r requirements.txt
+
+git clone https://github.com/shonagase/mlbb_analyze_move.git
+cd mlbb_analyze_move
+docker-compose up --build
+
+
