@@ -47,8 +47,9 @@ else:
             with st.spinner("Downloading video..."):
                 # yt-dlpの設定
                 ydl_opts = {
-                    'format': 'best',  # 最高品質の動画をダウンロード（以前は720p以下だったものを変更）
-                    'outtmpl': 'temp_video.%(ext)s'
+                    'format': 'best',  # 最高品質の動画をダウンロード
+                    'outtmpl': 'temp_video.%(ext)s',
+                    'cookiesfrombrowser': ('chrome',),  # Chromeブラウザからクッキーを取得
                 }
                 
                 # 動画のダウンロード
@@ -82,11 +83,127 @@ if video_path is not None and video_path.exists():
     st.write(f"FPS: {fps}")
     st.write(f"Total Frames: {total_frames}")
     
-    # フレーム選択スライダー
-    frame_number = st.slider("Select Frame", 0, total_frames-1, 0)
+    # フレーム選択のレイアウト
+    col_prev, col_slider, col_next = st.columns([1, 10, 1])
+    
+    # セッション状態の初期化
+    if 'current_frame' not in st.session_state:
+        st.session_state.current_frame = 0
+    
+    with col_prev:
+        if st.button("◀"):
+            # 前のフレームへ（最小値以下にはならないように）
+            st.session_state.current_frame = max(0, st.session_state.current_frame - 1)
+    
+    with col_slider:
+        frame_number = st.slider("Select Frame", 
+                               min_value=0, 
+                               max_value=total_frames-1, 
+                               value=st.session_state.current_frame)
+        # スライダーの値が変更されたら、current_frameを更新
+        st.session_state.current_frame = frame_number
+    
+    with col_next:
+        if st.button("▶"):
+            # 次のフレームへ（最大値以上にはならないように）
+            st.session_state.current_frame = min(total_frames-1, st.session_state.current_frame + 1)
+    
+    # 現在のフレーム番号を表示
+    st.write(f"Current Frame: {st.session_state.current_frame}")
+    
+    # 差分分析の設定
+    st.sidebar.subheader("Analysis Options")
+    analyze_differences = st.sidebar.checkbox("Analyze Frame Differences", value=False)
+    compare_with_base = st.sidebar.checkbox("Compare with Base Minimap", value=False)
     
     # 選択したフレームを表示
-    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, st.session_state.current_frame)
+    ret, frame = cap.read()
+    if ret:
+        # フレームからミニマップを抽出
+        current_minimap = analyzer.extract_minimap(frame)
+        
+        # ベースミニマップとの比較
+        if compare_with_base:
+            diff_map, diff_stats = analyzer.compare_with_base(current_minimap)
+            if diff_map is not None:
+                st.subheader("Base Minimap Comparison")
+                col_base, col_current, col_diff = st.columns(3)
+                
+                with col_base:
+                    st.image(cv2.cvtColor(analyzer.base_minimap, cv2.COLOR_BGR2RGB),
+                            caption="Base Minimap",
+                            use_column_width=True)
+                
+                with col_current:
+                    st.image(cv2.cvtColor(current_minimap, cv2.COLOR_BGR2RGB),
+                            caption="Current Minimap",
+                            use_column_width=True)
+                
+                with col_diff:
+                    st.image(cv2.cvtColor(diff_map, cv2.COLOR_BGR2RGB),
+                            caption="Difference Map",
+                            use_column_width=True)
+                
+                # 差分の統計情報を表示
+                st.write("Difference Statistics:")
+                st.write(f"Total differences detected: {diff_stats['total_differences']}")
+                st.write(f"Total difference area: {diff_stats['total_diff_area']:.2f} pixels²")
+                
+                if diff_stats['total_differences'] > 0:
+                    st.write("\nDifference Areas:")
+                    for i, area in enumerate(diff_stats['diff_areas']):
+                        st.write(f"Area {i+1}:")
+                        st.write(f"- Center: {area['center']}")
+                        st.write(f"- Size: {area['area']:.2f} pixels²")
+        
+        if analyze_differences:
+            # 3つの連続フレームのミニマップを取得
+            minimaps = []
+            for i in range(3):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, st.session_state.current_frame + i)
+                ret, frame = cap.read()
+                if ret:
+                    # フレームからミニマップを抽出
+                    minimap = analyzer.extract_minimap(frame)
+                    minimaps.append(minimap)
+            
+            if len(minimaps) == 3:
+                # ミニマップに対して差分分析を実行
+                prob_map, changes = analyzer.analyze_frame_differences(minimaps)
+                
+                # 結果の可視化
+                heatmap = analyzer.visualize_changes(prob_map, changes)
+                
+                # 結果を表示
+                st.subheader("Minimap Difference Analysis")
+                col3, col4 = st.columns(2)
+                
+                with col3:
+                    st.image(cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB), 
+                            caption="Minimap Change Probability Heatmap", 
+                            use_column_width=True)
+                
+                with col4:
+                    st.write("Change Statistics:")
+                    st.write(f"Total changes detected: {changes['total_changes']}")
+                    st.write("Movement Vectors:")
+                    for i, mv in enumerate(changes['movement_vectors']):
+                        st.write(f"Vector {i+1}:")
+                        st.write(f"- Start: {mv['start']}")
+                        st.write(f"- End: {mv['end']}")
+                        st.write(f"- Velocity: {mv['velocity']:.2f} pixels")
+                    
+                    # 変化領域の詳細情報を表示
+                    st.write("\nChange Areas:")
+                    for i, area in enumerate(changes['change_areas']):
+                        st.write(f"Area {i+1}:")
+                        st.write(f"- Center: {area['center']}")
+                        st.write(f"- Size: {area['area']:.2f} pixels²")
+                        st.write(f"- Intensity: {area['intensity']:.2f}")
+    
+    # 選択したフレームを表示
+    cap.set(cv2.CAP_PROP_POS_FRAMES, st.session_state.current_frame)
     ret, frame = cap.read()
     if ret:
         # フレームをRGBに変換

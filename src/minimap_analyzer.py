@@ -4,6 +4,9 @@ from typing import Dict, List, Tuple, Optional
 import logging
 from collections import defaultdict
 import pytesseract  # OCRのために追加
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -41,6 +44,28 @@ MINIMAP_CONSTANTS = {
         'height': 0.06  # ROIの高さ
     }
 }
+
+class PositionPredictor(nn.Module):
+    def __init__(self):
+        super(PositionPredictor, self).__init__()
+        # シンプルなCNN + RNNモデル
+        self.cnn = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2)
+        )
+        self.rnn = nn.LSTM(input_size=16* (image_height//2) * (image_width//2), hidden_size=128, num_layers=1, batch_first=True)
+        self.fc = nn.Linear(128, image_height * image_width)  # 出力: 位置の確率マップ
+    
+    def forward(self, x):  # x: バッチ x シーケンス長 x チャネル x 高さ x 幅
+        batch_size, seq_len, c, h, w = x.size()
+        cnn_out = []
+        for t in range(seq_len):
+            cnn_out.append(self.cnn(x[:, t]))  # 各フレームをCNNで処理
+        cnn_out = torch.stack(cnn_out).view(batch_size, seq_len, -1)  # RNN入力に整形
+        rnn_out, _ = self.rnn(cnn_out)
+        out = self.fc(rnn_out[:, -1])  # 最終出力
+        return F.softmax(out.view(batch_size, image_height, image_width), dim=1)  # 確率分布
 
 class MinimapAnalyzer:
     def __init__(self):
@@ -85,6 +110,14 @@ class MinimapAnalyzer:
         # ミニマップのサイズ（初期値）
         self.minimap_width = 0
         self.minimap_height = 0
+
+        self.kernel_size = (5, 5)
+        self.threshold = 30
+        self.min_area = 50
+        self.max_area = 500
+        self.base_minimap = cv2.imread('/Users/shoyanagatomo/Documents/git/mlbb_analyze_move/base_picture/Minimap.webp')
+        if self.base_minimap is not None:
+            self.base_minimap = cv2.resize(self.base_minimap, (200, 200))
 
     def _is_player_icon(self, contour: np.ndarray) -> bool:
         """
@@ -468,3 +501,215 @@ class MinimapAnalyzer:
                        0.4, (255, 255, 255), 1)
         
         return vis_map 
+
+    def predict_position_probabilities(self, image_sequence: List[np.ndarray]) -> np.ndarray:
+        # image_sequence: [過去A, 過去B, 現在A, 現在B, 将来A, 将来B]
+        model = PositionPredictor()  # モデルインスタンス
+        model.eval()  # 評価モード
+        # シーケンスをテンソルに変換（簡易実装、実際は前処理が必要）
+        input_tensor = torch.from_numpy(np.array(image_sequence)).permute(0, 3, 1, 2).unsqueeze(0).float()  # バッチ追加
+        with torch.no_grad():
+            output = model(input_tensor)
+            return output.numpy()[0]  # 確率マップを返す 
+
+    def analyze_frame_differences(self, frames: List[np.ndarray]) -> Tuple[np.ndarray, Dict]:
+        """
+        3つの連続フレーム間の差分を分析し、変化の確率分布を計算
+
+        Args:
+            frames (List[np.ndarray]): 3つの連続フレーム [frame1, frame2, frame3]
+
+        Returns:
+            Tuple[np.ndarray, Dict]: 確率マップと変化の統計情報
+        """
+        if len(frames) != 3:
+            raise ValueError("3つのフレームが必要です")
+
+        # フレームをグレースケールに変換
+        grays = [cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) for frame in frames]
+        
+        # 差分を計算
+        diff1 = cv2.absdiff(grays[0], grays[1])
+        diff2 = cv2.absdiff(grays[1], grays[2])
+        
+        # ミニマップ用に閾値を調整（より小さな変化も検出）
+        _, thresh1 = cv2.threshold(diff1, 20, 255, cv2.THRESH_BINARY)
+        _, thresh2 = cv2.threshold(diff2, 20, 255, cv2.THRESH_BINARY)
+        
+        # 2つの差分の組み合わせ
+        combined_diff = cv2.bitwise_or(thresh1, thresh2)
+        
+        # ノイズ除去（カーネルサイズを小さくしてミニマップの細かい変化を保持）
+        kernel = np.ones((2,2), np.uint8)
+        combined_diff = cv2.morphologyEx(combined_diff, cv2.MORPH_OPEN, kernel)
+        
+        # 変化領域の検出
+        contours, _ = cv2.findContours(combined_diff, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # 確率マップの作成（ヒートマップ形式）
+        height, width = combined_diff.shape
+        prob_map = np.zeros((height, width), dtype=np.float32)
+        
+        # 変化の統計情報
+        changes = {
+            'total_changes': len(contours),
+            'change_areas': [],
+            'movement_vectors': []
+        }
+        
+        # 各変化領域の分析（ミニマップ用に面積の閾値を調整）
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < 5:  # ミニマップでの最小面積を調整
+                continue
+                
+            # 変化領域の中心を計算
+            M = cv2.moments(contour)
+            if M["m00"] != 0:
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+                
+                # ガウシアン分布で確率を表現（σをミニマップのスケールに合わせて調整）
+                sigma = np.sqrt(area) / 4  # より狭い範囲に
+                y, x = np.ogrid[-cy:height-cy, -cx:width-cx]
+                gaussian = np.exp(-(x*x + y*y) / (2*sigma*sigma))
+                prob_map = np.maximum(prob_map, gaussian)
+                
+                # 変化情報を記録
+                changes['change_areas'].append({
+                    'center': (cx, cy),
+                    'area': area,
+                    'intensity': np.mean(combined_diff[cy-2:cy+3, cx-2:cx+3])
+                })
+                
+                # フレーム間の移動ベクトルを計算（探索範囲をミニマップに合わせて調整）
+                if len(changes['movement_vectors']) < 5:
+                    prev_pos = self._find_corresponding_position(grays[0], (cx, cy), search_radius=10)
+                    next_pos = self._find_corresponding_position(grays[2], (cx, cy), search_radius=10)
+                    if prev_pos and next_pos:
+                        movement = {
+                            'start': prev_pos,
+                            'mid': (cx, cy),
+                            'end': next_pos,
+                            'velocity': np.sqrt((next_pos[0]-prev_pos[0])**2 + (next_pos[1]-prev_pos[1])**2)
+                        }
+                        changes['movement_vectors'].append(movement)
+        
+        # 確率マップの正規化
+        if np.max(prob_map) > 0:
+            prob_map = prob_map / np.max(prob_map)
+        
+        return prob_map, changes
+
+    def _find_corresponding_position(self, frame: np.ndarray, center: Tuple[int, int], 
+                                   search_radius: int = 20) -> Optional[Tuple[int, int]]:
+        """
+        指定されたフレームで対応する位置を探索
+        """
+        cx, cy = center
+        h, w = frame.shape
+        
+        # 探索範囲を制限
+        x1 = max(0, cx - search_radius)
+        y1 = max(0, cy - search_radius)
+        x2 = min(w, cx + search_radius + 1)
+        y2 = min(h, cy + search_radius + 1)
+        
+        # テンプレートマッチングで最も類似した位置を探索
+        template = frame[cy-2:cy+3, cx-2:cx+3]  # 5x5のテンプレート
+        if template.shape[0] > 0 and template.shape[1] > 0:
+            roi = frame[y1:y2, x1:x2]
+            result = cv2.matchTemplate(roi, template, cv2.TM_CCOEFF_NORMED)
+            _, _, _, max_loc = cv2.minMaxLoc(result)
+            
+            # 探索範囲内での相対位置を全体座標に変換
+            return (x1 + max_loc[0], y1 + max_loc[1])
+        
+        return None
+
+    def visualize_changes(self, prob_map: np.ndarray, changes: Dict) -> np.ndarray:
+        """
+        変化の確率マップと統計情報を可視化
+        """
+        # 確率マップをヒートマップとしてカラー化
+        heatmap = cv2.applyColorMap((prob_map * 255).astype(np.uint8), cv2.COLORMAP_JET)
+        
+        # 移動ベクトルを描画
+        for movement in changes['movement_vectors']:
+            # 移動の軌跡を矢印で表示
+            cv2.arrowedLine(heatmap, movement['start'], movement['end'], 
+                          (255, 255, 255), 2, tipLength=0.3)
+            
+            # 中間点をマーク
+            cv2.circle(heatmap, movement['mid'], 3, (0, 255, 0), -1)
+        
+        # 変化領域の中心をマーク
+        for area in changes['change_areas']:
+            cv2.circle(heatmap, area['center'], 5, (0, 0, 255), -1)
+        
+        return heatmap 
+
+    def compare_with_base(self, current_minimap):
+        """
+        ベースミニマップと現在のミニマップを比較し、差分を検出する
+        
+        Args:
+            current_minimap: 現在のフレームから抽出したミニマップ画像
+        
+        Returns:
+            diff_map: 差分を可視化した画像
+            diff_stats: 差分の統計情報
+        """
+        if self.base_minimap is None:
+            return None, {"error": "Base minimap not loaded"}
+
+        # 現在のミニマップをベースミニマップと同じサイズにリサイズ
+        current_minimap = cv2.resize(current_minimap, (200, 200))
+
+        # グレースケールに変換
+        base_gray = cv2.cvtColor(self.base_minimap, cv2.COLOR_BGR2GRAY)
+        current_gray = cv2.cvtColor(current_minimap, cv2.COLOR_BGR2GRAY)
+
+        # 差分を計算
+        diff = cv2.absdiff(base_gray, current_gray)
+        
+        # 閾値処理
+        _, thresh = cv2.threshold(diff, self.threshold, 255, cv2.THRESH_BINARY)
+        
+        # ノイズ除去
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, self.kernel_size)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+
+        # 差分領域の検出
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # 差分の可視化
+        diff_map = current_minimap.copy()
+        diff_areas = []
+        
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if self.min_area < area < self.max_area:
+                # 差分領域の中心を計算
+                M = cv2.moments(contour)
+                if M["m00"] != 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                    
+                    # 差分領域を赤色で描画
+                    cv2.drawContours(diff_map, [contour], -1, (0, 0, 255), 2)
+                    cv2.circle(diff_map, (cx, cy), 3, (255, 0, 0), -1)
+                    
+                    diff_areas.append({
+                        "center": (cx, cy),
+                        "area": area,
+                        "contour": contour.tolist()
+                    })
+
+        diff_stats = {
+            "total_differences": len(diff_areas),
+            "diff_areas": diff_areas,
+            "total_diff_area": sum(area["area"] for area in diff_areas)
+        }
+
+        return diff_map, diff_stats 
