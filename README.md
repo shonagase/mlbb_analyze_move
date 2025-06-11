@@ -31,11 +31,10 @@ Mobile Legends: Bang Bang（MLBB）の試合動画を分析するツールです
 
 ## Good pattern
 
-
+right-screen: ほぼ適切にキャラクターを検知できている
 ![スクリーンショット 2025-06-11 10 07 54](https://github.com/user-attachments/assets/e9cc99eb-2393-4111-bcfe-fbe8d5871c68)
 
-
-
+left-screen: 左上に動きの反応が高いので、戦いが激化している可能性が高い。右下は動きがあまりないので見合っている状態と考えられる
 ![スクリーンショット 2025-06-11 10 08 05](https://github.com/user-attachments/assets/3385f1f7-c8d1-40c1-a178-cd97a44ca79a)
 
 
