@@ -24,7 +24,19 @@ Mobile Legends: Bang Bang（MLBB）の試合動画を分析するツールです
 
 
 ミニマップ上で、救援を要請したり、戦いを要請したりすると画像のように、波紋のようなものが広がる。この場合は波紋に対して検知が発生するのでうまくいかない。
+
 ![スクリーンショット 2025-06-11 9 32 22](https://github.com/user-attachments/assets/606545fa-ad92-40f5-be2f-a850a4fc1810)
+
+
+
+## Good pattern
+
+
+![スクリーンショット 2025-06-11 10 07 54](https://github.com/user-attachments/assets/e9cc99eb-2393-4111-bcfe-fbe8d5871c68)
+
+
+
+![スクリーンショット 2025-06-11 10 08 05](https://github.com/user-attachments/assets/3385f1f7-c8d1-40c1-a178-cd97a44ca79a)
 
 
 ## 必要条件
