@@ -508,7 +508,7 @@ class MinimapAnalyzer:
                        cv2.FONT_HERSHEY_SIMPLEX,
                        0.4, (255, 255, 255), 1)
         
-        return vis_map 
+        return vis_map
 
     def predict_position_probabilities(self, image_sequence: List[np.ndarray]) -> np.ndarray:
         # image_sequence: [過去A, 過去B, 現在A, 現在B, 将来A, 将来B]
@@ -1076,7 +1076,7 @@ class MinimapAnalyzer:
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
             ret, frame = cap.read()
             if ret:
-                minimap = self.extract_minimap(frame)
+        minimap = self.extract_minimap(frame)
                 if minimap is not None:
                     frames.append(frame)
                     minimaps.append(minimap)

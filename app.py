@@ -59,8 +59,8 @@ else:
                 
                 # ダウンロードを試行
                 try:
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = ydl.extract_info(youtube_url, download=True)
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(youtube_url, download=True)
                         if os.path.exists(TEMP_VIDEO_PATH):
                             video_path = TEMP_VIDEO_PATH
                         else:
@@ -75,10 +75,10 @@ else:
 
 if video_path and os.path.exists(video_path):
     try:
-        # ビデオの読み込み
+    # ビデオの読み込み
         cap = cv2.VideoCapture(video_path)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = int(cap.get(cv2.CAP_PROP_FPS))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
         
         # アナライザーの初期化
         analyzer = MinimapAnalyzer()
@@ -129,7 +129,7 @@ if video_path and os.path.exists(video_path):
                         st.image(processed,
                                 caption="Processed Time Display",
                                 use_column_width=True)
-                
+        
                 # 時系列分析を実行
                 movement_map, time_stats = analyzer.analyze_time_series(
                     cap,
@@ -139,9 +139,9 @@ if video_path and os.path.exists(video_path):
                 )
                 
                 # 結果の表示
-                col1, col2 = st.columns(2)
-                
-                with col1:
+        col1, col2 = st.columns(2)
+        
+        with col1:
                     st.write("### Movement Map")
                     st.image(cv2.cvtColor(movement_map, cv2.COLOR_BGR2RGB),
                             caption="Movement Over Time",
@@ -168,8 +168,8 @@ if video_path and os.path.exists(video_path):
                             end_time = analyzer.extract_game_time(end_frame_img)
                             if end_time:
                                 st.write(f"Analysis End Time: {end_time}")
-                
-                with col2:
+        
+        with col2:
                     st.write("### Hot Zones")
                     if time_stats["hot_zones"]:
                         hot_zone_map = cv2.cvtColor(analyzer.base_minimap.copy(), cv2.COLOR_BGR2RGB)
@@ -187,7 +187,7 @@ if video_path and os.path.exists(video_path):
                         st.image(hot_zone_map,
                                 caption="Activity Hot Zones",
                                 use_column_width=True)
-                        
+                            
                         # ホットゾーンの統計情報
                         st.write("### Movement Statistics")
                         st.write(f"Total movements detected: {time_stats['total_movements']}")
@@ -233,7 +233,7 @@ if video_path and os.path.exists(video_path):
                     st.write("Difference Statistics:")
                     st.write(f"Total differences detected: {diff_stats['total_differences']}")
                     st.write(f"Total difference area: {diff_stats['total_diff_area']:.2f} pixels²")
-                    
+            
                     if diff_stats['total_differences'] > 0:
                         st.write("\nDifference Areas:")
                         for i, area in enumerate(diff_stats['diff_areas']):
@@ -248,9 +248,9 @@ if video_path and os.path.exists(video_path):
     finally:
         # キャプチャを解放
         if 'cap' in locals():
-            cap.release()
-        
-        # 一時ファイルの削除
+    cap.release()
+    
+    # 一時ファイルの削除
         try:
             if os.path.exists(video_path):
                 os.remove(video_path)
